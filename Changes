@@ -1,6 +1,10 @@
 Changes
 ======
 
+0.00003 04 Feb 2010
+    * Fix timing issues
+    * add kill_proc() to safely kill processes
+
 0.00002 03 Feb 2010
     * Check for defined-ness when checking for ports
 

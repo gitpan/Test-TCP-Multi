@@ -2,14 +2,15 @@ package Test::TCP::Multi;
 use strict;
 use base qw(Exporter);
 use Config;
+use IO::Handle;
 use IO::Socket::INET;
 use Test::SharedFork;
 use POSIX ();
 use Storable qw(nstore_fd fd_retrieve);
 use Time::HiRes();
 
-our $VERSION = '0.00002';
-our @EXPORT = qw( empty_port test_multi_tcp wait_port );
+our $VERSION = '0.00003';
+our @EXPORT = qw( empty_port test_multi_tcp wait_port kill_proc );
 
 # process does not die when received SIGTERM, on win32.
 my $TERMSIG = $^O eq 'MSWin32' ? 'KILL' : 'TERM';
@@ -34,13 +35,27 @@ sub empty_port {
 sub test_multi_tcp {
     my %args = @_;
 
-    my %ports;
-    my $prev;
+    my (%ports, %pids, $prev);
     foreach my $server (grep { /^server/i } keys %args) {
         $prev = $ports{$server} = empty_port( defined $prev ? $prev + 1 : () );
     }
 
-    my %pids;
+    my $reaper = sub {
+        while ( scalar keys %pids > 0 && (my $kid = waitpid( -1, POSIX::WNOHANG() ) ) > 0 ) {
+            delete $pids{ $kid };
+            if ($^O ne 'MSWin32') { # i'm not in hell
+                if (POSIX::WIFSIGNALED($?)) {
+                    my $signame = (split(' ', $Config{sig_name}))[POSIX::WTERMSIG($?)];
+                    if ($signame =~ /^(ABRT|PIPE)$/) {
+                        Test::More::diag("your process received SIG$signame")
+                    }
+                }
+            }
+        }
+    };
+
+    local $SIG{CHLD} = $reaper;
+
     my %processes;
     my %sockets;
     foreach my $name ( grep { /^(?:server|client)/i } keys %args ) {
@@ -83,38 +98,35 @@ sub test_multi_tcp {
         $data{$name}->{pid} = $pid;
     }
 
-    foreach my $name ( grep { /^(?:server|client)/i } keys %args ) {
+    foreach my $name ( grep { /^server/i } keys %args ) {
         # send each process information about other processes
         Storable::nstore_fd \%data, $sockets{$name};
+        IO::Handle::flush($sockets{$name});
     }
-    undef %sockets;
 
     my ($sig, $loop);
-    {
+    RUN: {
         $loop = 1;
         local $SIG{INT}  = sub { $sig = "INT"; $loop = 0 };
         local $SIG{PIPE} = sub { $sig = "PIPE"; $loop = 0 };
 
-
         while ( my($server, $port) = each %ports) {
-            wait_port($port);
+            eval {
+                wait_port($port);
+            };
+            if ($@) {
+                while ( my ($name, $pid) = each %processes ) {
+                    kill_proc( $pid );
+                }
+                last RUN;
+            }
         }
 
-        my $reaper = sub {
-            while ( scalar keys %pids > 0 && (my $kid = waitpid( -1, POSIX::WNOHANG() ) ) > 0 ) {
-                delete $pids{ $kid };
-                if ($^O ne 'MSWin32') { # i'm not in hell
-                    if (POSIX::WIFSIGNALED($?)) {
-                        my $signame = (split(' ', $Config{sig_name}))[POSIX::WTERMSIG($?)];
-                        if ($signame =~ /^(ABRT|PIPE)$/) {
-                            Test::More::diag("your process received SIG$signame")
-                        }
-                    }
-                }
-            }
-        };
-
-        local $SIG{CHLD} = $reaper;
+        foreach my $name ( grep { /^client/i } keys %args ) {
+            # send each process information about other processes
+            Storable::nstore_fd \%data, $sockets{$name};
+            IO::Handle::flush($sockets{$name});
+        }
 
         while($loop && scalar keys %pids) {
             $reaper->();
@@ -122,7 +134,7 @@ sub test_multi_tcp {
 
         if (scalar keys %pids) {
             while (my($name, $pid) = each %processes) {
-                kill $TERMSIG, $pid;
+                kill_proc( $pid );
             }
         }
                 
@@ -130,6 +142,13 @@ sub test_multi_tcp {
 
     if ($sig) {
         kill $sig, $$; # rethrow signal after cleanup
+    }
+}
+
+sub kill_proc {
+    foreach my $pid (@_) {
+        next unless $pid;
+        kill $TERMSIG => $pid;
     }
 }
 
@@ -204,7 +223,7 @@ Server callbacks should expect two arguments, the port number you should use, an
 
 B<UNLIKE Test::TCP>, YOU HAVE TO KILL THE SERVERS YOURSELF! This is because there's no way for Test::TCP::Multi to know if you're really done with the servers or not. Simply do something like
 
-    kill TERM => $data_hash->{ your_server_name }->{pid};
+    kill_proc($data_hash->{ your_server_name }->{pid});
 
 =head1 CLIENTS
 
