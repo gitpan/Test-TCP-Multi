@@ -5,11 +5,12 @@ use Config;
 use IO::Handle;
 use IO::Socket::INET;
 use Test::SharedFork;
+use Test::More ();
 use POSIX ();
 use Storable qw(nstore_fd fd_retrieve);
 use Time::HiRes();
 
-our $VERSION = '0.00003';
+our $VERSION = '0.00004';
 our @EXPORT = qw( empty_port test_multi_tcp wait_port kill_proc );
 
 # process does not die when received SIGTERM, on win32.
@@ -81,7 +82,11 @@ sub test_multi_tcp {
                     $code->( $data );
                 }
             };
-            if ($@) { die "child $name ($$): $@" }
+            if ($@) { 
+                my $message = "child $name ($$): $@";
+                Test::More::diag($message);
+                die $message;
+            }
             exit;
         } else {
             die "fork failed: $!";
@@ -115,6 +120,7 @@ sub test_multi_tcp {
                 wait_port($port);
             };
             if ($@) {
+                Test::More::diag("Failed to spawn server $server: $@");
                 while ( my ($name, $pid) = each %processes ) {
                     kill_proc( $pid );
                 }
@@ -177,7 +183,7 @@ sub wait_port {
         return if _check_port($port);
         Time::HiRes::sleep(0.1);
     }
-    die "cannot open port: $port";
+    die "Waited for port $port, but was not available";
 }
 
 1;
